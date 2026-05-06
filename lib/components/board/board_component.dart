@@ -8,9 +8,13 @@ import '../../game/game_state.dart';
 import '../towers/tower_component.dart';
 import 'cell_component.dart';
 
-class BoardComponent extends PositionComponent with TapCallbacks {
+class BoardComponent extends PositionComponent with DragCallbacks {
   final List<List<CellComponent>> _cells = [];
-  CellComponent? _selectedCell;
+
+  // Drag state
+  CellComponent? _dragSource;
+  _DragGhost? _ghost;
+  Vector2 _lastDragLocal = Vector2.zero();
 
   BoardComponent()
       : super(
@@ -38,22 +42,19 @@ class BoardComponent extends PositionComponent with TapCallbacks {
     }
   }
 
-  /// Try to summon a random tower in a free cell. Returns false if no free cells.
+  // ── Summon ───────────────────────────────────────────────────────────────────
+
   bool summonTower() {
     if (!GameState().spendMana(GameConstants.summonCost)) return false;
-
-    final freeCells = <CellComponent>[];
-    for (final row in _cells) {
-      for (final cell in row) {
-        if (!cell.hasTower) freeCells.add(cell);
-      }
-    }
+    final freeCells = [
+      for (final row in _cells)
+        for (final cell in row)
+          if (!cell.hasTower) cell
+    ];
     if (freeCells.isEmpty) {
-      // Refund mana
       GameState().addMana(GameConstants.summonCost.toDouble());
       return false;
     }
-
     final rng = Random();
     final cell = freeCells[rng.nextInt(freeCells.length)];
     final type = TowerType.values[rng.nextInt(TowerType.values.length)];
@@ -61,118 +62,237 @@ class BoardComponent extends PositionComponent with TapCallbacks {
     return true;
   }
 
-  @override
-  void onTapDown(TapDownEvent event) {
-    final localPos = event.localPosition;
-    final col = (localPos.x / GameConstants.cellSize).floor()
-        .clamp(0, GameConstants.boardCols - 1);
-    final row = (localPos.y / GameConstants.cellSize).floor()
-        .clamp(0, GameConstants.boardRows - 1);
-    final tapped = _cells[row][col];
+  // ── Drag callbacks ────────────────────────────────────────────────────────────
 
-    if (_selectedCell == null) {
-      // Select a tower
-      if (tapped.hasTower) {
-        _selectedCell = tapped;
-        tapped.tower!.select();
+  @override
+  void onDragStart(DragStartEvent event) {
+    super.onDragStart(event);
+    final cell = _cellAt(event.localPosition);
+    if (cell?.hasTower != true) return;
+
+    _dragSource = cell;
+    _lastDragLocal = event.localPosition.clone();
+    cell!.isDragging = true;
+
+    _ghost = _DragGhost(type: cell.tower!.type, rank: cell.tower!.rank);
+    _ghost!.position = absolutePosition + _lastDragLocal;
+    parent?.add(_ghost!);
+  }
+
+  @override
+  void onDragUpdate(DragUpdateEvent event) {
+    super.onDragUpdate(event);
+    if (_dragSource == null) return;
+    // localEndPosition is already in this component's local coordinate space.
+    _lastDragLocal = event.localEndPosition.clone();
+    _ghost?.position = absolutePosition + _lastDragLocal;
+    _refreshDropHighlights(_lastDragLocal);
+  }
+
+  @override
+  void onDragEnd(DragEndEvent event) {
+    super.onDragEnd(event);
+    _finalizeDrag();
+  }
+
+  @override
+  void onDragCancel(DragCancelEvent event) {
+    super.onDragCancel(event);
+    _finalizeDrag();
+  }
+
+  void _finalizeDrag() {
+    if (_dragSource == null) return;
+
+    _dragSource!.isDragging = false;
+    _clearDropHighlights();
+
+    final target = _cellAt(_lastDragLocal);
+    if (target != null && target != _dragSource && _dragSource!.hasTower) {
+      if (!target.hasTower) {
+        _moveTower(_dragSource!, target);
+      } else if (_canMerge(_dragSource!, target)) {
+        _mergeTowers(_dragSource!, target);
       }
-    } else {
-      if (tapped == _selectedCell) {
-        // Deselect
-        _deselect();
-      } else if (tapped.hasTower &&
-          tapped.tower!.type == _selectedCell!.tower!.type &&
-          tapped.tower!.rank == _selectedCell!.tower!.rank &&
-          _selectedCell!.tower!.rank < GameConstants.maxRank) {
-        // Merge
-        _mergeTowers(_selectedCell!, tapped);
-      } else if (!tapped.hasTower) {
-        // Move tower to empty cell
-        _moveTower(_selectedCell!, tapped);
-      } else {
-        // Switch selection
-        _deselect();
-        if (tapped.hasTower) {
-          _selectedCell = tapped;
-          tapped.tower!.select();
-        }
+    }
+
+    _ghost?.removeFromParent();
+    _ghost = null;
+    _dragSource = null;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────────
+
+  CellComponent? _cellAt(Vector2 localPos) {
+    if (localPos.x < 0 || localPos.y < 0 ||
+        localPos.x >= size.x || localPos.y >= size.y) return null;
+    final col = (localPos.x / GameConstants.cellSize)
+        .floor()
+        .clamp(0, GameConstants.boardCols - 1);
+    final row = (localPos.y / GameConstants.cellSize)
+        .floor()
+        .clamp(0, GameConstants.boardRows - 1);
+    return _cells[row][col];
+  }
+
+  bool _canMerge(CellComponent a, CellComponent b) =>
+      a.hasTower &&
+      b.hasTower &&
+      a.tower!.type == b.tower!.type &&
+      a.tower!.rank == b.tower!.rank &&
+      a.tower!.rank < GameConstants.maxRank;
+
+  void _refreshDropHighlights(Vector2 localPos) {
+    _clearDropHighlights();
+    final hover = _cellAt(localPos);
+    if (hover != null && hover != _dragSource && _dragSource?.hasTower == true) {
+      hover.isDropTarget = !hover.hasTower || _canMerge(_dragSource!, hover);
+    }
+  }
+
+  void _clearDropHighlights() {
+    for (final row in _cells) {
+      for (final cell in row) {
+        cell.isDropTarget = false;
       }
     }
   }
 
   void _mergeTowers(CellComponent from, CellComponent into) {
-    final fromType = from.tower!.type;
+    final type = from.tower!.type;
     final newRank = from.tower!.rank + 1;
     from.removeTower();
     into.removeTower();
-    into.placeTower(TowerComponent(type: fromType, rank: newRank));
+    into.placeTower(TowerComponent(type: type, rank: newRank));
     into.setHighlight(true);
-    _selectedCell = null;
-    // Spawn merge particles
     parent?.add(_MergeFlash(position: into.absolutePosition + into.size / 2));
   }
 
   void _moveTower(CellComponent from, CellComponent to) {
-    final t = from.removeTower()!;
-    to.placeTower(t);
-    t.deselect();
-    _selectedCell = null;
+    to.placeTower(from.removeTower()!);
   }
 
-  void _deselect() {
-    _selectedCell?.tower?.deselect();
-    _selectedCell = null;
-  }
-
-  bool get isFull {
-    for (final row in _cells) {
-      for (final cell in row) {
-        if (!cell.hasTower) return false;
-      }
-    }
-    return true;
-  }
+  // ── Board render ──────────────────────────────────────────────────────────────
 
   @override
   void render(Canvas canvas) {
-    // Board background
-    final bgPaint = Paint()..color = const Color(0xFF0D1B2E);
     canvas.drawRRect(
       RRect.fromRectAndRadius(
         Rect.fromLTWH(-4, -4, size.x + 8, size.y + 8),
-        const Radius.circular(12),
+        const Radius.circular(14),
       ),
-      bgPaint,
+      Paint()..color = const Color(0xFF0D1B2E),
     );
     super.render(canvas);
   }
 }
 
+// ── Drag ghost ────────────────────────────────────────────────────────────────
+
+class _DragGhost extends PositionComponent {
+  final TowerType type;
+  final int rank;
+  static const double _s = GameConstants.cellSize * 1.08;
+  double _pulse = 0;
+
+  _DragGhost({required this.type, required this.rank})
+      : super(size: Vector2.all(_s), anchor: Anchor.center);
+
+  @override
+  void update(double dt) => _pulse += dt * 5;
+
+  @override
+  void render(Canvas canvas) {
+    final r = _s / 2;
+    final scale = 1.0 + sin(_pulse) * 0.04;
+
+    canvas.save();
+    canvas.translate(r, r);
+    canvas.scale(scale, scale);
+    canvas.translate(-r, -r);
+
+    // Soft glow
+    canvas.drawCircle(
+      Offset(r, r),
+      r + 6,
+      Paint()
+        ..color = _color.withOpacity(0.3)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10),
+    );
+
+    // Hex body
+    _drawHex(canvas, r, r, r - 4, _color.withOpacity(0.88));
+
+    // Rank badge
+    if (rank > 1) {
+      canvas.drawCircle(
+        Offset(_s - 9, 9),
+        8,
+        Paint()..color = GameConstants.accentGold,
+      );
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '$rank',
+          style: const TextStyle(
+              color: Color(0xFF1A1A1A), fontSize: 10, fontWeight: FontWeight.bold),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(_s - 9 - tp.width / 2, 9 - tp.height / 2));
+    }
+
+    canvas.restore();
+  }
+
+  Color get _color => switch (type) {
+        TowerType.cannon => GameConstants.cannonColor,
+        TowerType.ice    => GameConstants.iceColor,
+        TowerType.poison => GameConstants.poisonColor,
+        TowerType.laser  => GameConstants.laserColor,
+        TowerType.bomb   => GameConstants.bombColor,
+      };
+
+  void _drawHex(Canvas canvas, double cx, double cy, double r, Color color) {
+    final path = Path();
+    for (int i = 0; i < 6; i++) {
+      final a = (i * pi / 3) - pi / 6;
+      final x = cx + cos(a) * r;
+      final y = cy + sin(a) * r;
+      if (i == 0) path.moveTo(x, y); else path.lineTo(x, y);
+    }
+    path.close();
+    canvas.drawPath(path, Paint()..color = color);
+    canvas.drawPath(path, Paint()
+      ..color = Colors.white.withOpacity(0.25)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2);
+  }
+}
+
+// ── Merge flash ───────────────────────────────────────────────────────────────
+
 class _MergeFlash extends PositionComponent {
   double _timer = 0;
-  static const double _duration = 0.5;
-
+  static const double _dur = 0.5;
   _MergeFlash({required Vector2 position})
       : super(position: position, anchor: Anchor.center);
 
   @override
   void update(double dt) {
     _timer += dt;
-    if (_timer >= _duration) removeFromParent();
+    if (_timer >= _dur) removeFromParent();
   }
 
   @override
   void render(Canvas canvas) {
-    final progress = (_timer / _duration).clamp(0.0, 1.0);
-    final r = 40.0 * progress;
-    final opacity = (1 - progress).clamp(0.0, 1.0);
-    final paint = Paint()
-      ..color = GameConstants.accentGold.withOpacity(opacity)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
-    canvas.drawCircle(Offset.zero, r, paint);
-    paint.color = const Color(0xFFFFFFFF).withOpacity(opacity * 0.5);
-    paint.style = PaintingStyle.fill;
-    canvas.drawCircle(Offset.zero, r * 0.4, paint);
+    final p = (_timer / _dur).clamp(0.0, 1.0);
+    final op = (1 - p).clamp(0.0, 1.0);
+    canvas.drawCircle(Offset.zero, 40.0 * p,
+        Paint()
+          ..color = GameConstants.accentGold.withOpacity(op)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3);
+    canvas.drawCircle(Offset.zero, 16.0 * p,
+        Paint()..color = Colors.white.withOpacity(op * 0.5));
   }
 }

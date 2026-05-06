@@ -30,12 +30,15 @@ class _GameHudState extends State<GameHud> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _TopBar(gs: _gs, game: widget.game),
-        const Spacer(),
-        _BottomBar(gs: _gs, game: widget.game),
-      ],
+    return SafeArea(
+      bottom: false,
+      child: Column(
+        children: [
+          _TopBar(gs: _gs, game: widget.game),
+          const Spacer(),
+          _BottomBar(gs: _gs, game: widget.game),
+        ],
+      ),
     );
   }
 }

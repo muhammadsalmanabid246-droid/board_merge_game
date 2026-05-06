@@ -4,23 +4,23 @@ class GameConstants {
   static const double gameWidth = 400.0;
   static const double gameHeight = 760.0;
 
-  // Board
+  // Board — fills full width with a 5px margin each side
   static const int boardCols = 5;
   static const int boardRows = 5;
-  static const double cellSize = 56.0;
+  static const double cellSize = 76.0; // (400 - 10*2) / 5
   static const double cellPadding = 3.0;
-  static const double boardLeft = 32.0;
-  static const double boardTop = 420.0;
+  static const double boardLeft = 10.0;  // (400 - 5*76) / 2 = 10
+  static const double boardTop = 285.0;
 
-  // Path (enemies travel top section)
-  static const double pathY1 = 240.0;
-  static const double pathY2 = 180.0;
+  // Path (enemies travel above the board)
+  static const double pathY1 = 218.0;
+  static const double pathY2 = 155.0;
 
   // Player
   static const int maxHealth = 20;
   static const int startMana = 30;
   static const int maxMana = 100;
-  static const double manaRegen = 4.0; // per second
+  static const double manaRegen = 4.0;
   static const int summonCost = 12;
 
   // Merging
@@ -39,6 +39,7 @@ class GameConstants {
   static const Color cellEmpty = Color(0xFF1E2D45);
   static const Color cellHighlight = Color(0xFF2A4A6A);
   static const Color cellSelected = Color(0xFF3A7ABB);
+  static const Color dropTargetColor = Color(0xFF44BB88);
 
   // Tower colors
   static const Color cannonColor = Color(0xFF8B9DC3);
